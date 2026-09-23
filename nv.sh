@@ -31,6 +31,83 @@ echo_y() { echo -e "${YELLOW}$1${PLAIN}"; }
 echo_b() { echo -e "${BLUE}$1${PLAIN}"; }
 echo_c() { echo -e "${CYAN}$1${PLAIN}"; }
 
+PORT80_PAUSED_UNITS=()
+
+restore_port80_services() {
+  local unit
+  for unit in "${PORT80_PAUSED_UNITS[@]}"; do
+    if systemctl start "$unit"; then
+      echo_g "已恢复占用 80 端口的服务: ${unit}"
+    else
+      echo_r "恢复 ${unit} 失败，请手动执行: systemctl start ${unit}"
+    fi
+  done
+  PORT80_PAUSED_UNITS=()
+}
+
+cleanup_port80_services() {
+  if ((${#PORT80_PAUSED_UNITS[@]} > 0)); then
+    systemctl stop naive
+    restore_port80_services
+  fi
+}
+
+pause_port80_services() {
+  local listeners pids pid status_output unit
+  local -a units=()
+
+  if ! command -v ss &>/dev/null; then
+    echo_r "无法检查 80 端口 (缺少 ss)，不会自动停止未知程序。"
+    return 1
+  fi
+
+  listeners=$(ss -H -ltnp 'sport = :80' 2>/dev/null)
+  if [[ -z "${listeners}" ]]; then
+    echo_c "80 端口空闲，无需暂停其他服务。"
+    return 0
+  fi
+
+  pids=$(printf '%s\n' "${listeners}" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+  if [[ -z "${pids}" ]]; then
+    echo_r "检测到 80 端口被占用，但无法识别进程；为避免误停程序，已取消换绑。"
+    return 1
+  fi
+
+  for pid in ${pids}; do
+    status_output=$(systemctl status "${pid}" --no-pager 2>/dev/null || true)
+    unit=$(printf '%s\n' "${status_output}" | head -n 1 | grep -oE '[[:alnum:]_.@-]+\.service' | head -n 1)
+    if [[ -z "${unit}" ]]; then
+      echo_r "80 端口进程 PID ${pid} 不属于可识别的 systemd 服务；为避免误停程序，已取消换绑。"
+      return 1
+    fi
+    if [[ " ${units[*]} " != *" ${unit} "* ]]; then
+      units+=("${unit}")
+    fi
+  done
+
+  for unit in "${units[@]}"; do
+    if systemctl is-active --quiet "${unit}"; then
+      echo_y "正在暂停占用 80 端口的服务: ${unit}"
+      PORT80_PAUSED_UNITS+=("${unit}")
+      if ! systemctl stop "${unit}"; then
+        restore_port80_services
+        echo_r "暂停 ${unit} 失败，已取消换绑。"
+        return 1
+      fi
+    fi
+  done
+
+  for _ in {1..10}; do
+    listeners=$(ss -H -ltnp 'sport = :80' 2>/dev/null)
+    [[ -z "${listeners}" ]] && return 0
+    sleep 1
+  done
+
+  restore_port80_services
+  echo_r "暂停服务后 80 端口仍被占用，已取消换绑。"
+  return 1
+}
+
 check_root() {
   if [[ -n "$SKIP_ROOT_CHECK" ]]; then
     return 0
@@ -277,12 +354,13 @@ get_port_bytes() {
 
 # 动态生成 Caddy naive.json
 rebuild_caddy_config() {
-  local domain ssl_type email crt_file key_file
+  local domain ssl_type email crt_file key_file http_port_disabled
   domain=$(jq -r '.domain // empty' "${CONFIG_FILE}")
   ssl_type=$(jq -r '.ssl_type // "acme"' "${CONFIG_FILE}")
   email=$(jq -r '.email // empty' "${CONFIG_FILE}")
   crt_file=$(jq -r '.crt_file // empty' "${CONFIG_FILE}")
   key_file=$(jq -r '.key_file // empty' "${CONFIG_FILE}")
+  http_port_disabled=$(jq -r '.http_port_disabled // false' "${CONFIG_FILE}")
 
   if [[ -z "$domain" ]]; then
     domain="127.0.0.1"
@@ -292,10 +370,11 @@ rebuild_caddy_config() {
   local ports
   ports=$(jq -r '[.[] | select(.status == "active")] | map(.port) | unique | .[]' "${NODES_FILE}" 2>/dev/null)
 
-  # 构建 servers JSON (默认包含 80 端口的 Web 伪装站点，便于 ACME 证书申请及防封探测)
+  # 绑定期间使用 80 端口提供伪装站点和 ACME HTTP 验证；证书签发后释放端口。
   local servers_json="{}"
-  local web_block
-  web_block=$(cat <<EOF
+  if [[ "${http_port_disabled}" != "true" ]]; then
+    local web_block
+    web_block=$(cat <<EOF
 {
   "listen": [":80"],
   "routes": [
@@ -318,7 +397,8 @@ rebuild_caddy_config() {
 }
 EOF
 )
-  servers_json=$(echo "$servers_json" | jq --argjson wblock "$web_block" '.["srv_web"] = $wblock')
+    servers_json=$(echo "$servers_json" | jq --argjson wblock "$web_block" '.["srv_web"] = $wblock')
+  fi
 
   if [[ -n "$ports" ]]; then
     for p in $ports; do
@@ -1089,7 +1169,7 @@ menu_bind_domain() {
 
     case "$sub_choice" in
       1)
-        echo_y "提示: 请先确认新域名已正确解析到本服务器公网 IP，且服务器 80 端口未被占用！"
+        echo_y "提示: 请先确认新域名已正确解析到本服务器公网 IP；申请证书时会暂停可识别的 systemd 80 端口服务。"
         local new_dom
         while read -r -p "请输入新域名 (如 nav.ssrr.today): " new_dom; do
           if [[ -n "$new_dom" ]]; then break; else echo_r "域名不能为空！"; fi
@@ -1100,10 +1180,17 @@ menu_bind_domain() {
         local ssl_type="acme"
         if [[ "$ssl_opt" == "2" ]]; then ssl_type="zerossl"; fi
 
+        if ! pause_port80_services; then
+          continue
+        fi
+        trap 'cleanup_port80_services' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+
         # 更新 config.json
         local updated_cfg
         updated_cfg=$(jq --arg dom "$new_dom" --arg ssl "$ssl_type" --arg email "$new_email" \
-          '.domain = $dom | .ssl_type = $ssl | .email = $email | .crt_file = "" | .key_file = ""' "${CONFIG_FILE}")
+          '.domain = $dom | .ssl_type = $ssl | .email = $email | .crt_file = "" | .key_file = "" | .http_port_disabled = false' "${CONFIG_FILE}")
         echo "$updated_cfg" | jq . > "${CONFIG_FILE}"
 
         # 同步更新现有所有节点的 domain 字段与链接
@@ -1113,7 +1200,38 @@ menu_bind_domain() {
         echo "$updated_nodes" | jq . > "${NODES_FILE}"
 
         rebuild_caddy_config
-        echo_g "换绑域名完成！配置已重载。新域名: ${CYAN}${new_dom}${PLAIN}"
+        if ! systemctl is-active --quiet naive; then
+          if ! systemctl start naive; then
+            restore_port80_services
+            trap - EXIT INT TERM
+            echo_r "Naive 启动失败，已恢复之前占用 80 端口的服务。请检查 journalctl -u naive。"
+            continue
+          fi
+        fi
+        if ((${#PORT80_PAUSED_UNITS[@]} > 0)); then
+          echo_y "Naive 正在申请证书。请另开终端运行 journalctl -u naive -f 查看日志，确认签发成功后按回车恢复之前占用 80 端口的服务。"
+          read -r -p "证书签发成功后按回车恢复原服务... " _
+          local port80_released=0
+          if jq '.http_port_disabled = true' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && \
+            mv -f "${CONFIG_FILE}.tmp" "${CONFIG_FILE}" && rebuild_caddy_config; then
+            for _ in {1..10}; do
+              if [[ -z "$(ss -H -ltnp 'sport = :80' 2>/dev/null)" ]]; then
+                port80_released=1
+                break
+              fi
+              sleep 1
+            done
+          fi
+          if [[ "${port80_released}" == "1" ]]; then
+            restore_port80_services
+          else
+            systemctl stop naive
+            restore_port80_services
+            echo_r "Naive 未释放 80 端口，已停止 Naive 并恢复原服务；请检查服务配置。"
+          fi
+          trap - EXIT INT TERM
+        fi
+        echo_g "换绑域名完成！新域名: ${CYAN}${new_dom}${PLAIN}"
         ;;
       2)
         local loc_dom

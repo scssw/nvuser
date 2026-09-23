@@ -847,8 +847,87 @@ install_project_game_page() {
   echo_content yellow "---> Could not fetch the project game page; keeping the existing index.html"
 }
 
+HTTP_80_PAUSED_UNITS=()
+
+restore_http_80_services() {
+  local unit
+  for unit in "${HTTP_80_PAUSED_UNITS[@]}"; do
+    if systemctl start "$unit"; then
+      echo_content green "---> Restored service: ${unit}"
+    else
+      echo_content red "---> Failed to restore ${unit}; start it manually with: systemctl start ${unit}"
+    fi
+  done
+  HTTP_80_PAUSED_UNITS=()
+}
+
+cleanup_http_80_services() {
+  if ((${#HTTP_80_PAUSED_UNITS[@]} > 0)); then
+    systemctl stop naive
+    restore_http_80_services
+  fi
+}
+
+pause_http_80_services() {
+  local listeners pids pid status_output unit
+  local -a units=()
+
+  if ! command -v ss &>/dev/null; then
+    echo_content red "---> Cannot inspect port 80 because ss is unavailable; refusing to start Naive"
+    return 1
+  fi
+
+  listeners=$(ss -H -ltnp 'sport = :80' 2>/dev/null)
+  if [[ -z "${listeners}" ]]; then
+    echo_content skyBlue "---> Port 80 is free; no existing service needs pausing"
+    return 0
+  fi
+
+  pids=$(printf '%s\n' "${listeners}" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+  if [[ -z "${pids}" ]]; then
+    echo_content red "---> Port 80 is occupied, but its process could not be identified; refusing to stop an unknown process"
+    return 1
+  fi
+
+  for pid in ${pids}; do
+    status_output=$(systemctl status "${pid}" --no-pager 2>/dev/null || true)
+    unit=$(printf '%s\n' "${status_output}" | head -n 1 | grep -oE '[[:alnum:]_.@-]+\.service' | head -n 1)
+    if [[ -z "${unit}" ]]; then
+      echo_content red "---> Port 80 listener PID ${pid} is not owned by a recognizable systemd service; refusing to stop it automatically"
+      return 1
+    fi
+    if [[ " ${units[*]} " != *" ${unit} "* ]]; then
+      units+=("${unit}")
+    fi
+  done
+
+  for unit in "${units[@]}"; do
+    if systemctl is-active --quiet "${unit}"; then
+      echo_content yellow "---> Pausing ${unit}, which is using port 80"
+      HTTP_80_PAUSED_UNITS+=("${unit}")
+      if systemctl stop "${unit}"; then
+        :
+      else
+        restore_http_80_services
+        echo_content red "---> Could not pause ${unit}; refusing to start Naive"
+        return 1
+      fi
+    fi
+  done
+
+  for _ in {1..10}; do
+    listeners=$(ss -H -ltnp 'sport = :80' 2>/dev/null)
+    [[ -z "${listeners}" ]] && return 0
+    sleep 1
+  done
+
+  restore_http_80_services
+  echo_content red "---> Port 80 is still occupied after pausing its service; refusing to start Naive"
+  return 1
+}
+
 bind_domain_for_install() {
-  echo_content yellow "提示: 请先确认域名已正确解析到本机器公网 IP，且服务器 80 端口未被占用"
+  echo_content yellow "提示: 请先确认域名已正确解析到本机器公网 IP；启动 Naive 申请证书时，脚本会暂停可识别的 systemd 80 端口服务"
   while read -r -p "请输入要绑定的域名 (必填): " naive_domain; do
     if [[ -z "${naive_domain}" ]]; then
       echo_content red "域名不能为空"
@@ -890,7 +969,8 @@ bind_domain_for_install() {
   "ssl_type": "${naive_ssl}",
   "email": "${naive_email}",
   "crt_file": "${naive_crt}",
-  "key_file": "${naive_key}"
+  "key_file": "${naive_key}",
+  "http_port_disabled": false
 }
 EOF
 
@@ -994,9 +1074,50 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload &&
-    systemctl enable naive &&
-    systemctl restart naive
+  if ! pause_http_80_services; then
+    echo_content red "---> Naive was installed, but its service was not started. Resolve the port 80 conflict and run: systemctl start naive"
+    return 1
+  fi
+
+  trap 'cleanup_http_80_services' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if ! systemctl daemon-reload || ! systemctl enable naive || ! systemctl restart naive; then
+    restore_http_80_services
+    trap - EXIT INT TERM
+    echo_content red "---> Could not start Naive; the previous port 80 service has been restored"
+    return 1
+  fi
+
+  if ((${#HTTP_80_PAUSED_UNITS[@]} > 0)); then
+    echo_content yellow "---> Naive 正在申请证书。请在另一个终端运行 journalctl -u naive -f 查看日志，确认签发成功后按回车恢复之前占用 80 端口的服务。"
+    read -r -p "证书签发成功后按回车恢复原服务... " _
+    if jq '.http_port_disabled = true' "${NAIVE_DATA_SYSTEMD}data/config.json" > "${NAIVE_DATA_SYSTEMD}data/config.json.tmp" && \
+      mv -f "${NAIVE_DATA_SYSTEMD}data/config.json.tmp" "${NAIVE_DATA_SYSTEMD}data/config.json" && \
+      /usr/local/naive/nv.sh --rebuild; then
+      local port80_released=0
+      for _ in {1..10}; do
+        if [[ -z "$(ss -H -ltnp 'sport = :80' 2>/dev/null)" ]]; then
+          port80_released=1
+          break
+        fi
+        sleep 1
+      done
+      if [[ "${port80_released}" == "1" ]]; then
+        restore_http_80_services
+      else
+        systemctl stop naive
+        restore_http_80_services
+        echo_content red "---> Naive did not release port 80; stopped it and restored the previous service. Check the service configuration."
+      fi
+    else
+      systemctl stop naive
+      restore_http_80_services
+      echo_content red "---> Could not release port 80 from Naive; stopped it and restored the previous service."
+    fi
+    trap - EXIT INT TERM
+  fi
 
   install_project_game_page "${NAIVE_DATA_SYSTEMD}html"
 
