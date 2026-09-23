@@ -37,13 +37,13 @@ Memory: ≥ 128MB
 Install Latest Version
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/install.sh)
 ```
 
 Install [Custom Version](https://github.com/jonssonyan/naive/releases)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/install.sh) v2.7.6
+bash <(curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/install.sh) v2.7.6
 ```
 
 ### systemd

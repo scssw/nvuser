@@ -42,13 +42,13 @@ CPU: x86_64/amd64 arm64/aarch64
 安装最新版 (仅需绑定域名，自动生成 `nv` 快捷命令):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/install.sh)
 ```
 
 安装[自定义版本](https://github.com/jonssonyan/naive/releases)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/install.sh) v2.7.6
+bash <(curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/install.sh) v2.7.6
 ```
 
 ## 管理面板 (nv)

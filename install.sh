@@ -825,6 +825,7 @@ download_random_game_page() {
 install_project_game_page() {
   local target_dir="$1"
   local script_dir
+  local temp_file
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
   if [[ -s "${script_dir}/game/index.html" ]]; then
@@ -834,7 +835,16 @@ install_project_game_page() {
     return 0
   fi
 
-  echo_content yellow "---> Project game page not found; keeping the existing index.html"
+  mkdir -p "${target_dir}"
+  temp_file="$(mktemp "${target_dir}/.index.html.XXXXXX")" || return 1
+  if curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/game/index.html -o "${temp_file}" && [[ -s "${temp_file}" ]]; then
+    mv -f "${temp_file}" "${target_dir}/index.html"
+    echo_content skyBlue "---> Project game page downloaded to ${target_dir}/index.html"
+    return 0
+  fi
+
+  rm -f "${temp_file}"
+  echo_content yellow "---> Could not fetch the project game page; keeping the existing index.html"
 }
 
 bind_domain_for_install() {
