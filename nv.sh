@@ -234,11 +234,11 @@ prompt_traffic_and_expire() {
   done
 }
 
-# Base64 凭据双重加密 (Caddy forwardproxy 需要)
+# Caddy forwardproxy 的 auth_credentials 使用一次 Base64 编码的 user:password。
 encode_credentials() {
   local user=$1
   local pass=$2
-  echo -n "${user}:${pass}" | base64 | tr -d '\r\n' | base64 | tr -d '\r\n'
+  printf '%s' "${user}:${pass}" | base64 | tr -d '\r\n'
 }
 
 # iptables 端口流量规则配置
@@ -563,7 +563,15 @@ save_node() {
   echo "$updated" | jq . > "${NODES_FILE}"
 
   rebuild_caddy_config
-  print_node_detail "$u" "$p" "$port" "$dom" "$quota" "$exp_str"
+  # Read display values from the saved JSON. This keeps the details and link
+  # tied to the exact credentials persisted for this node.
+  print_node_detail \
+    "$(jq -r '.username' <<< "$new_node")" \
+    "$(jq -r '.password' <<< "$new_node")" \
+    "$(jq -r '.port' <<< "$new_node")" \
+    "$(jq -r '.domain' <<< "$new_node")" \
+    "$(jq -r '.quota_gb' <<< "$new_node")" \
+    "$(jq -r '.expire_time' <<< "$new_node")"
 }
 
 # ==================== 菜单 1: 服务器控制 ====================

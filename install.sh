@@ -853,9 +853,20 @@ EOF
 }
 
 install_naive_systemd() {
-  if systemctl list-units --type=service --all | grep -q 'naive.service'; then
-    echo_content skyBlue "---> naive is already installed"
-    exit 0
+  if [[ -f /etc/systemd/system/naive.service || -x /usr/local/naive/naive ]] || \
+     systemctl list-units --type=service --all 2>/dev/null | grep -q 'naive.service'; then
+    echo_content yellow "---> Detected an existing systemd installation of naive."
+    read -r -p "Overwrite the program and update the nv menu while keeping node data? (y/N): " overwrite_install
+    case "$overwrite_install" in
+      y|Y|yes|YES)
+        upgrade_naive_systemd force
+        return
+        ;;
+      *)
+        echo_content yellow "---> Existing installation kept unchanged"
+        return
+        ;;
+    esac
   fi
 
   echo_content green "---> Install naive"
@@ -965,7 +976,7 @@ upgrade_naive_systemd() {
 
   latest_version=$(curl -Ls "https://api.github.com/repos/jonssonyan/naive/releases/latest" | grep '"tag_name":' | sed 's/.*"tag_name": "\(.*\)",.*/\1/')
   current_version=$(/usr/local/naive/naive version | awk '{print $1}')
-  if [[ "${latest_version}" == "${current_version}" ]]; then
+  if [[ "${latest_version}" == "${current_version}" && "$1" != "force" ]]; then
     echo_content skyBlue "---> naive is already the latest version"
     exit 0
   fi
@@ -980,10 +991,28 @@ upgrade_naive_systemd() {
     bin_url=https://github.com/jonssonyan/naive/releases/download/v2.7.5/naive-linux-${get_arch}
   fi
 
-  curl -fsSL "${bin_url}" -o /usr/local/naive/naive &&
-    chmod +x /usr/local/naive/naive &&
-    systemctl restart naive
-  echo_content skyBlue "---> naive upgrade successful"
+  local_bin_tmp="/usr/local/naive/naive.new"
+  if ! curl -fsSL "${bin_url}" -o "${local_bin_tmp}"; then
+    rm -f "${local_bin_tmp}"
+    echo_content red "---> Failed to download naive; existing installation was kept"
+    return 1
+  fi
+  chmod +x "${local_bin_tmp}" && mv -f "${local_bin_tmp}" /usr/local/naive/naive || return 1
+
+  # Refresh the project's management menu too; keep data/configuration intact.
+  local_nv_tmp="/usr/local/naive/nv.sh.new"
+  if curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/nv.sh -o "${local_nv_tmp}"; then
+    sed -i 's/\r$//' "${local_nv_tmp}"
+    chmod +x "${local_nv_tmp}" && mv -f "${local_nv_tmp}" /usr/local/naive/nv.sh
+    ln -sf /usr/local/naive/nv.sh /usr/local/bin/nv
+    ln -sf /usr/local/naive/nv.sh /usr/bin/nv
+  else
+    rm -f "${local_nv_tmp}"
+    echo_content yellow "---> Menu download failed; kept the current nv menu"
+  fi
+
+  systemctl restart naive
+  echo_content skyBlue "---> naive program and management menu update completed"
 }
 
 uninstall_naive_systemd() {
@@ -1572,8 +1601,18 @@ set_naive_docker() {
 
 install_naive_docker() {
   if [[ -n $(docker ps -a -q -f "name=^naive$") ]]; then
-    echo_content skyBlue "---> naive is already installed"
-    exit 0
+    echo_content yellow "---> Detected an existing Docker installation of naive."
+    read -r -p "Replace the container with this version while keeping mounted data? (y/N): " overwrite_docker
+    case "$overwrite_docker" in
+      y|Y|yes|YES)
+        upgrade_naive_docker
+        return
+        ;;
+      *)
+        echo_content yellow "---> Existing Docker installation kept unchanged"
+        return
+        ;;
+    esac
   fi
 
   echo_content green "---> Install naive"
