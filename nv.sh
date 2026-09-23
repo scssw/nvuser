@@ -497,6 +497,21 @@ EOF
   fi
 }
 
+# 节点链接附带客户端显示备注：域名前缀、端口和到期月日。
+build_node_url() {
+  local u=$1
+  local p=$2
+  local dom=$3
+  local port=$4
+  local exp_str=$5
+  local domain_prefix=${dom%%.*}
+  local month_day
+
+  month_day=$(date -d "$exp_str" "+%m.%d" 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$exp_str" "+%m.%d" 2>/dev/null)
+  printf 'naive+https://%s:%s@%s:%s#%s:%s-%s' \
+    "$u" "$p" "$dom" "$port" "$domain_prefix" "$port" "$month_day"
+}
+
 # 格式化打印单个节点信息
 print_node_detail() {
   local u=$1
@@ -505,7 +520,8 @@ print_node_detail() {
   local dom=$4
   local quota=$5
   local exp_str=$6
-  local link="naive+https://${u}:${p}@${dom}:${port}"
+  local link
+  link=$(build_node_url "$u" "$p" "$dom" "$port" "$exp_str")
 
   echo -e "\n${GREEN}================== 节点配置信息 ==================${PLAIN}"
   echo -e " 域名:         ${CYAN}${dom}${PLAIN}"
@@ -533,7 +549,8 @@ save_node() {
   local exp_str=$7
   local now_str
   now_str=$(date "+%Y-%m-%d %H:%M:%S")
-  local link="naive+https://${u}:${p}@${dom}:${port}"
+  local link
+  link=$(build_node_url "$u" "$p" "$dom" "$port" "$exp_str")
 
   local new_node
   new_node=$(jq -n \
@@ -755,6 +772,7 @@ sub_modify_node() {
 
   # 清除前后空格
   raw_url=$(echo "$raw_url" | xargs)
+  raw_url=${raw_url%%#*}
 
   # 解析 URL: naive+https://username:password@domain:port
   # 或者 https://username:password@domain:port
@@ -984,7 +1002,8 @@ menu_show_traffic() {
         local exp=$(echo "$n" | jq -r .expire_time)
         local exp_ts=$(echo "$n" | jq -r .expire_timestamp)
         local st=$(echo "$n" | jq -r .status)
-        local link=$(echo "$n" | jq -r .node_url)
+        local link
+        link=$(build_node_url "$u" "$pwd" "$dom" "$sel_port" "$exp")
 
         local now_ts=$(date +%s)
         local is_expired="有效"
@@ -1044,7 +1063,7 @@ menu_bind_domain() {
         # 同步更新现有所有节点的 domain 字段与链接
         local updated_nodes
         updated_nodes=$(jq --arg dom "$new_dom" \
-          'map(.domain = $dom | .node_url = "naive+https://\(.username):\(.password)@\($dom):\(.port)")' "${NODES_FILE}")
+          'map(.domain = $dom | .node_url = "naive+https://\(.username):\(.password)@\($dom):\(.port)#\($dom | split(".")[0]):\(.port)-\(.expire_time[5:7]).\(.expire_time[8:10])")' "${NODES_FILE}")
         echo "$updated_nodes" | jq . > "${NODES_FILE}"
 
         rebuild_caddy_config
@@ -1072,7 +1091,7 @@ menu_bind_domain() {
 
         local updated_nodes
         updated_nodes=$(jq --arg dom "$loc_dom" \
-          'map(.domain = $dom | .node_url = "naive+https://\(.username):\(.password)@\($dom):\(.port)")' "${NODES_FILE}")
+          'map(.domain = $dom | .node_url = "naive+https://\(.username):\(.password)@\($dom):\(.port)#\($dom | split(".")[0]):\(.port)-\(.expire_time[5:7]).\(.expire_time[8:10])")' "${NODES_FILE}")
         echo "$updated_nodes" | jq . > "${NODES_FILE}"
 
         rebuild_caddy_config
