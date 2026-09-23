@@ -1000,18 +1000,24 @@ upgrade_naive_systemd() {
 
   # Refresh the project's management menu too; keep data/configuration intact.
   local_nv_tmp="/usr/local/naive/nv.sh.new"
-  if curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/nv.sh -o "${local_nv_tmp}"; then
+  local menu_updated=0
+  if curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/nv.sh -o "${local_nv_tmp}"; then
     sed -i 's/\r$//' "${local_nv_tmp}"
     chmod +x "${local_nv_tmp}" && mv -f "${local_nv_tmp}" /usr/local/naive/nv.sh
     ln -sf /usr/local/naive/nv.sh /usr/local/bin/nv
     ln -sf /usr/local/naive/nv.sh /usr/bin/nv
+    menu_updated=1
   else
     rm -f "${local_nv_tmp}"
     echo_content yellow "---> Menu download failed; kept the current nv menu"
   fi
 
   systemctl restart naive
-  echo_content skyBlue "---> naive program and management menu update completed"
+  if [[ "${menu_updated}" == "1" ]]; then
+    echo_content skyBlue "---> naive program and management menu update completed"
+  else
+    echo_content yellow "---> naive program upgraded; management menu kept unchanged"
+  fi
 }
 
 uninstall_naive_systemd() {
