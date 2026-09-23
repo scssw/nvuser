@@ -822,6 +822,21 @@ download_random_game_page() {
   fi
 }
 
+install_project_game_page() {
+  local target_dir="$1"
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  if [[ -s "${script_dir}/game/index.html" ]]; then
+    mkdir -p "${target_dir}"
+    cp -f "${script_dir}/game/index.html" "${target_dir}/index.html"
+    echo_content skyBlue "---> Project game page installed as ${target_dir}/index.html"
+    return 0
+  fi
+
+  echo_content yellow "---> Project game page not found; keeping the existing index.html"
+}
+
 bind_domain_for_install() {
   echo_content yellow "提示: 请先确认域名已正确解析到本机器公网 IP，且服务器 80 端口未被占用"
   while read -r -p "请输入要绑定的域名 (必填): " naive_domain; do
@@ -882,6 +897,7 @@ install_naive_systemd() {
     case "$overwrite_install" in
       y|Y|yes|YES)
         upgrade_naive_systemd force
+        install_project_game_page "${NAIVE_DATA_SYSTEMD}html"
         return
         ;;
       *)
@@ -972,7 +988,7 @@ EOF
     systemctl enable naive &&
     systemctl restart naive
 
-  download_random_game_page "${NAIVE_DATA_SYSTEMD}html"
+  install_project_game_page "${NAIVE_DATA_SYSTEMD}html"
 
   # 设置定时任务 (每小时检测到期和流量超额)
   if command -v crontab &>/dev/null; then
@@ -1635,6 +1651,7 @@ install_naive_docker() {
     case "$overwrite_docker" in
       y|Y|yes|YES)
         upgrade_naive_docker
+        install_project_game_page "${NAIVE_DATA_DOCKER}html"
         return
         ;;
       *)
@@ -1685,6 +1702,7 @@ EOF
       -v /naive/config/:/naive/config/ \
       jonssonyan/naive"${naive_docker_version}" \
       ./naive run --config ${naive_config_docker}
+  install_project_game_page "${NAIVE_DATA_DOCKER}html"
   echo_content skyBlue "---> naive install successful"
 }
 
@@ -1702,7 +1720,7 @@ upgrade_naive_docker() {
   current_version=$(docker exec naive ./naive version | awk '{print $1}')
   if [[ "${latest_version}" == "${current_version}" ]]; then
     echo_content skyBlue "---> naive is already the latest version"
-    exit 0
+    return 0
   fi
 
   echo_content green "---> Upgrade naive"
