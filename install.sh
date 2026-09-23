@@ -179,11 +179,30 @@ check_sys() {
 install_depend() {
   if [[ "${package_manager}" == 'apt-get' || "${package_manager}" == 'apt' ]]; then
     ${package_manager} update -y
+    ${package_manager} install -y \
+      curl \
+      systemd \
+      nftables \
+      iptables \
+      jq \
+      bc \
+      cron \
+      tar
+    systemctl enable cron &>/dev/null
+    systemctl restart cron &>/dev/null
+  elif [[ "${package_manager}" == 'yum' || "${package_manager}" == 'dnf' ]]; then
+    ${package_manager} install -y \
+      curl \
+      systemd \
+      nftables \
+      iptables \
+      tar \
+      cronie \
+      epel-release
+    ${package_manager} install -y jq bc
+    systemctl enable crond &>/dev/null
+    systemctl restart crond &>/dev/null
   fi
-  ${package_manager} install -y \
-    curl \
-    systemd \
-    nftables
 }
 
 setup_docker() {
@@ -781,6 +800,58 @@ set_naive() {
   done
 }
 
+bind_domain_for_install() {
+  echo_content yellow "提示: 请先确认域名已正确解析到本机器公网 IP，且服务器 80 端口未被占用"
+  while read -r -p "请输入要绑定的域名 (必填): " naive_domain; do
+    if [[ -z "${naive_domain}" ]]; then
+      echo_content red "域名不能为空"
+    else
+      break
+    fi
+  done
+
+  read -r -p "请输入您的邮箱 (用于申请 SSL 证书，可选直接回车): " naive_email
+
+  while read -r -p "请选择证书申请方式 (1/acme(Let's Encrypt) 2/zerossl 3/custom(自定义已有证书) 默认: 1): " naive_ssl_type; do
+    if [[ -z "${naive_ssl_type}" || ${naive_ssl_type} == 1 ]]; then
+      naive_ssl="acme"
+      break
+    elif [[ ${naive_ssl_type} == 2 ]]; then
+      naive_ssl="zerossl"
+      break
+    elif [[ ${naive_ssl_type} == 3 ]]; then
+      naive_ssl="custom"
+      while read -r -p "请输入证书 .crt 文件的绝对路径: " naive_crt; do
+        if [[ -f "$naive_crt" ]]; then break; else echo_content red "文件不存在: $naive_crt"; fi
+      done
+      while read -r -p "请输入私钥 .key 文件的绝对路径: " naive_key; do
+        if [[ -f "$naive_key" ]]; then break; else echo_content red "文件不存在: $naive_key"; fi
+      done
+      break
+    else
+      echo_content red "请输入 1、2 或 3"
+    fi
+  done
+
+  mkdir -p "${NAIVE_DATA_SYSTEMD}data"
+  mkdir -p "/root/nvback"
+  mkdir -p "${NAIVE_DATA_SYSTEMD}file_system"
+  
+  cat >"${NAIVE_DATA_SYSTEMD}data/config.json" <<EOF
+{
+  "domain": "${naive_domain}",
+  "ssl_type": "${naive_ssl}",
+  "email": "${naive_email}",
+  "crt_file": "${naive_crt}",
+  "key_file": "${naive_key}"
+}
+EOF
+
+  if [[ ! -f "${NAIVE_DATA_SYSTEMD}data/nodes.json" ]]; then
+    echo "[]" > "${NAIVE_DATA_SYSTEMD}data/nodes.json"
+  fi
+}
+
 install_naive_systemd() {
   if systemctl list-units --type=service --all | grep -q 'naive.service'; then
     echo_content skyBlue "---> naive is already installed"
@@ -817,21 +888,73 @@ Commercial support is available at
 </html>
 EOF
 
-  set_naive
+  bind_domain_for_install
 
   bin_url=https://github.com/jonssonyan/naive/releases/latest/download/naive-linux-${get_arch}
   if [[ "latest" != "${naive_systemd_version}" ]]; then
     bin_url=https://github.com/jonssonyan/naive/releases/download/${naive_systemd_version}/naive-linux-${get_arch}
   fi
 
-  curl -fsSL "${bin_url}" -o /usr/local/naive/naive &&
-    chmod +x /usr/local/naive/naive &&
-    curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/naive.service -o /etc/systemd/system/naive.service &&
-    sed -i "s|^ExecStart=.*|ExecStart=/usr/local/naive/naive run --config ${naive_config_systemd}|" "/etc/systemd/system/naive.service" &&
-    systemctl daemon-reload &&
+  curl -fsSL "${bin_url}" -o /usr/local/naive/naive && chmod +x /usr/local/naive/naive
+
+  # 安装 nv.sh 管理脚本
+  if [[ -f "./nv.sh" ]]; then
+    cp -f ./nv.sh /usr/local/naive/nv.sh
+  elif [[ -f "$(dirname "$0")/nv.sh" ]]; then
+    cp -f "$(dirname "$0")/nv.sh" /usr/local/naive/nv.sh
+  else
+    curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/nv.sh -o /usr/local/naive/nv.sh 2>/dev/null || \
+    curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/nv.sh -o /usr/local/naive/nv.sh
+  fi
+  sed -i 's/\r$//' /usr/local/naive/nv.sh
+  chmod +x /usr/local/naive/nv.sh
+
+  # 创建全局 nv 快捷命令
+  ln -sf /usr/local/naive/nv.sh /usr/local/bin/nv
+  ln -sf /usr/local/naive/nv.sh /usr/bin/nv
+
+  # 生成初始 Caddy 配置
+  /usr/local/naive/nv.sh --rebuild
+
+  # 配置 systemd 服务
+  cat >/etc/systemd/system/naive.service <<EOF
+[Unit]
+Description=naive
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/naive/
+ExecStart=/usr/local/naive/naive run --config ${naive_config_systemd}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload &&
     systemctl enable naive &&
     systemctl restart naive
-  echo_content skyBlue "---> naive install successful"
+
+  # 设置定时任务 (每小时检测到期和流量超额)
+  if command -v crontab &>/dev/null; then
+    crontab -l 2>/dev/null | grep -v 'nv.sh --cron' | { cat; echo "0 * * * * /usr/local/naive/nv.sh --cron >/dev/null 2>&1"; } | crontab -
+  fi
+
+  echo_content green "\n=============================================================="
+  echo_content skyBlue "恭喜！NaiveProxy 基础服务与域名绑定已成功安装！"
+  echo_content yellow "已为您安装全局快捷命令: nv"
+  echo_content yellow "在终端任意位置输入: nv 即可进入交互式管理菜单！"
+  echo_content yellow "您可以在菜单中一键新增用户节点、配置多端口、查看流量统计等。"
+  echo_content green "==============================================================\n"
+
+  read -r -p "是否现在进入 nv 管理菜单？(y/n 默认: y): " enter_nv
+  if [[ -z "$enter_nv" || "$enter_nv" == "y" || "$enter_nv" == "Y" ]]; then
+    /usr/local/naive/nv.sh
+  fi
 }
 
 upgrade_naive_systemd() {
@@ -877,7 +1000,12 @@ uninstall_naive_systemd() {
     rm -f /etc/systemd/system/naive.service &&
     systemctl daemon-reload &&
     rm -rf /usr/local/naive/ &&
+    rm -f /usr/local/bin/nv /usr/bin/nv &&
     systemctl reset-failed
+
+  if command -v crontab &>/dev/null; then
+    crontab -l 2>/dev/null | grep -v 'nv.sh --cron' | crontab -
+  fi
   echo_content skyBlue "---> naive uninstall successful"
 }
 

@@ -1,0 +1,6 @@
+# 强制 Shell 脚本使用 Unix 格式换行符 (LF)
+* text=auto eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf
