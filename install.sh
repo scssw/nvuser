@@ -986,10 +986,9 @@ upgrade_naive_systemd() {
     systemctl stop naive
   fi
 
+  # The current nv menu generates auth_credentials JSON, which requires a
+  # newer forwardproxy module than the legacy v2.7.5 binary.
   bin_url=https://github.com/jonssonyan/naive/releases/latest/download/naive-linux-${get_arch}
-  if ! version_ge "${current_version}" "v2.7.6"; then
-    bin_url=https://github.com/jonssonyan/naive/releases/download/v2.7.5/naive-linux-${get_arch}
-  fi
 
   local_bin_tmp="/usr/local/naive/naive.new"
   if ! curl -fsSL "${bin_url}" -o "${local_bin_tmp}"; then
@@ -1001,7 +1000,7 @@ upgrade_naive_systemd() {
 
   # Refresh the project's management menu too; keep data/configuration intact.
   local_nv_tmp="/usr/local/naive/nv.sh.new"
-  if curl -fsSL https://raw.githubusercontent.com/scssw/nvuser/main/nv.sh -o "${local_nv_tmp}"; then
+  if curl -fsSL https://raw.githubusercontent.com/jonssonyan/naive/main/nv.sh -o "${local_nv_tmp}"; then
     sed -i 's/\r$//' "${local_nv_tmp}"
     chmod +x "${local_nv_tmp}" && mv -f "${local_nv_tmp}" /usr/local/naive/nv.sh
     ln -sf /usr/local/naive/nv.sh /usr/local/bin/nv

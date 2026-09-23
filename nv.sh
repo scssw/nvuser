@@ -234,11 +234,12 @@ prompt_traffic_and_expire() {
   done
 }
 
-# Caddy forwardproxy 的 auth_credentials 使用一次 Base64 编码的 user:password。
+# Caddy 的 JSON 解码会先对 []byte 字段做 Base64 解码；插件再与客户端
+# 发送的 Basic 凭据比较，因此配置里的字符串需要双重 Base64 编码。
 encode_credentials() {
   local user=$1
   local pass=$2
-  printf '%s' "${user}:${pass}" | base64 | tr -d '\r\n'
+  printf '%s' "${user}:${pass}" | base64 | tr -d '\r\n' | base64 | tr -d '\r\n'
 }
 
 # iptables 端口流量规则配置
