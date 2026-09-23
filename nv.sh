@@ -763,8 +763,8 @@ sub_add_multi_user() {
 
 
 sub_modify_node() {
-  echo -e "\n请输入需要操作的节点链接 (例如 naive+https://scssw:006250@nav.ssrr.today:5566):"
-  read -r -p "节点链接: " raw_url
+  echo -e "\n请输入节点链接或端口号 (支持备注后缀，例如 naive+https://user:pass@nav.ssrr.today:5566#nav:5566-10.23):"
+  read -r -p "节点链接/端口: " raw_url
   if [[ -z "$raw_url" ]]; then
     echo_r "输入为空！"
     return
@@ -774,31 +774,57 @@ sub_modify_node() {
   raw_url=$(echo "$raw_url" | xargs)
   raw_url=${raw_url%%#*}
 
-  # 解析 URL: naive+https://username:password@domain:port
-  # 或者 https://username:password@domain:port
-  local clean_url=${raw_url#naive+}
-  clean_url=${clean_url#*://}
+  local matched_idx
+  if [[ "$raw_url" =~ ^[0-9]{1,5}$ ]]; then
+    local port_matches=()
+    while IFS= read -r idx; do
+      [[ -n "$idx" ]] && port_matches+=("$idx")
+    done < <(jq -r --arg port "$raw_url" \
+      'to_entries[] | select((.value.port | tostring) == $port) | .key' "${NODES_FILE}")
 
-  local user_pass=${clean_url%%@*}
-  local host_port=${clean_url##*@}
+    if [[ ${#port_matches[@]} -eq 0 ]]; then
+      echo_r "端口 ${raw_url} 下没有找到节点！"
+      return
+    elif [[ ${#port_matches[@]} -eq 1 ]]; then
+      matched_idx=${port_matches[0]}
+    else
+      echo -e "\n端口 ${CYAN}${raw_url}${PLAIN} 下有多个用户，请选择："
+      local i=1
+      for idx in "${port_matches[@]}"; do
+        local node=$(jq ".[$idx]" "${NODES_FILE}")
+        echo -e " ${i}. 用户: $(jq -r '.username' <<< "$node") | 到期: $(jq -r '.expire_time' <<< "$node") | 状态: $(jq -r '.status' <<< "$node")"
+        i=$((i + 1))
+      done
+      read -r -p "请输入序号 [1-${#port_matches[@]}]: " node_choice
+      if [[ ! "$node_choice" =~ ^[0-9]+$ || "$node_choice" -lt 1 || "$node_choice" -gt ${#port_matches[@]} ]]; then
+        echo_r "选择无效，已取消。"
+        return
+      fi
+      matched_idx=${port_matches[$((node_choice - 1))]}
+    fi
+  else
+    # 解析 URL: naive+https://username:password@domain:port
+    # 或者 https://username:password@domain:port
+    local clean_url=${raw_url#naive+}
+    clean_url=${clean_url#*://}
+    local user_pass=${clean_url%%@*}
+    local host_port=${clean_url##*@}
+    local req_u=${user_pass%%:*}
+    local req_p=${user_pass##*:}
+    local req_port=${host_port##*:}
 
-  local req_u=${user_pass%%:*}
-  local req_p=${user_pass##*:}
-  local req_dom=${host_port%%:*}
-  local req_port=${host_port##*:}
+    if [[ "$user_pass" == "$clean_url" || -z "$req_u" || -z "$req_p" || ! "$req_port" =~ ^[0-9]{1,5}$ ]]; then
+      echo_r "无法解析该节点格式，请输入端口号或完整节点链接！"
+      return
+    fi
 
-  if [[ -z "$req_u" || -z "$req_p" || -z "$req_port" ]]; then
-    echo_r "无法解析该节点格式，请确认链接是否完整！"
-    return
+    # 在 nodes.json 中查找，备注后缀已在 URL 解析前移除。
+    matched_idx=$(jq -r --arg u "$req_u" --arg p "$req_p" --arg port "$req_port" \
+      'to_entries[] | select(.value.username == $u and .value.password == $p and (.value.port|tostring) == $port) | .key' "${NODES_FILE}" | head -n 1)
   fi
 
-  # 在 nodes.json 中查找
-  local matched_idx
-  matched_idx=$(jq -r --arg u "$req_u" --arg p "$req_p" --arg port "$req_port" \
-    'to_entries[] | select(.value.username == $u and .value.password == $p and (.value.port|tostring) == $port) | .key' "${NODES_FILE}" | head -n 1)
-
   if [[ -z "$matched_idx" ]]; then
-    echo_r "未在系统中找到与该链接匹配的节点！"
+    echo_r "未找到匹配的节点！"
     return
   fi
 
@@ -857,10 +883,12 @@ sub_modify_node() {
           if (( old_ts < now_ts )); then base_ts=$now_ts; fi
           local new_exp_ts=$(( base_ts + add_days * 86400 ))
           local new_exp_str=$(date -d "@${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
+          local new_node_url
+          new_node_url=$(build_node_url "$c_u" "$c_p" "$c_dom" "$c_port" "$new_exp_str")
           
           local updated
-          updated=$(jq --arg idx "$matched_idx" --arg ts "$new_exp_ts" --arg str "$new_exp_str" \
-            '.[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
+          updated=$(jq --arg idx "$matched_idx" --arg ts "$new_exp_ts" --arg str "$new_exp_str" --arg link "$new_node_url" \
+            '.[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].node_url = $link | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
           echo "$updated" | jq . > "${NODES_FILE}"
           rebuild_caddy_config
           echo_g "修改成功！新到期时间: ${CYAN}${new_exp_str}${PLAIN}"
@@ -868,20 +896,36 @@ sub_modify_node() {
           echo_r "输入天数不合法！"
         fi
       elif [[ "$t_choice" == "2" ]]; then
-        read -r -p "请输入有效天数 (从现在算起, 如 30): " set_days
-        if [[ "$set_days" =~ ^[0-9]+$ && "$set_days" -gt 0 ]]; then
+        read -r -p "请输入有效天数(如 30)或到期日期 YY.M.D (如 26.9.25): " set_value
+        local new_exp_ts new_exp_str
+        if [[ "$set_value" =~ ^[0-9]+$ && "$set_value" -gt 0 ]]; then
           local now_ts=$(date +%s)
-          local new_exp_ts=$(( now_ts + set_days * 86400 ))
-          local new_exp_str=$(date -d "@${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
-          
+          new_exp_ts=$(( now_ts + set_value * 86400 ))
+          new_exp_str=$(date -d "@${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "${new_exp_ts}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null)
+        else
+          local parsed_date
+          parsed_date=$(parse_custom_date "$set_value")
+          if [[ -z "$parsed_date" ]]; then
+            echo_r "请输入正整数天数，或有效日期 YY.M.D (如 26.9.25)！"
+            return
+          fi
+          new_exp_ts=${parsed_date%%|*}
+          new_exp_str=${parsed_date#*|}
+          if (( new_exp_ts <= $(date +%s) )); then
+            echo_r "到期日期必须晚于当前时间！"
+            return
+          fi
+        fi
+
+        if [[ -n "$new_exp_ts" && -n "$new_exp_str" ]]; then
+          local new_node_url
+          new_node_url=$(build_node_url "$c_u" "$c_p" "$c_dom" "$c_port" "$new_exp_str")
           local updated
-          updated=$(jq --arg idx "$matched_idx" --arg ts "$new_exp_ts" --arg str "$new_exp_str" \
-            '.[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
+          updated=$(jq --arg idx "$matched_idx" --arg ts "$new_exp_ts" --arg str "$new_exp_str" --arg link "$new_node_url" \
+            '.[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].node_url = $link | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
           echo "$updated" | jq . > "${NODES_FILE}"
           rebuild_caddy_config
           echo_g "修改成功！新到期时间: ${CYAN}${new_exp_str}${PLAIN}"
-        else
-          echo_r "输入天数不合法！"
         fi
       fi
       ;;
@@ -892,9 +936,11 @@ sub_modify_node() {
         read -r -p "是否同时按新流量重新推算/设定到期时间？(y/n 默认: n): " sync_exp
         if [[ "$sync_exp" == "y" || "$sync_exp" == "Y" ]]; then
           prompt_traffic_and_expire
+          local new_node_url
+          new_node_url=$(build_node_url "$c_u" "$c_p" "$c_dom" "$c_port" "$TRAFFIC_EXP_STR")
           local updated
-          updated=$(jq --arg idx "$matched_idx" --arg q "$TRAFFIC_QUOTA" --arg ts "$TRAFFIC_EXP_TS" --arg str "$TRAFFIC_EXP_STR" \
-            '.[($idx | tonumber)].quota_gb = ($q | tonumber) | .[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
+          updated=$(jq --arg idx "$matched_idx" --arg q "$TRAFFIC_QUOTA" --arg ts "$TRAFFIC_EXP_TS" --arg str "$TRAFFIC_EXP_STR" --arg link "$new_node_url" \
+            '.[($idx | tonumber)].quota_gb = ($q | tonumber) | .[($idx | tonumber)].expire_timestamp = ($ts | tonumber) | .[($idx | tonumber)].expire_time = $str | .[($idx | tonumber)].node_url = $link | .[($idx | tonumber)].status = "active"' "${NODES_FILE}")
           echo "$updated" | jq . > "${NODES_FILE}"
           rebuild_caddy_config
           echo_g "修改成功！新流量限额: ${CYAN}${TRAFFIC_QUOTA} GB${PLAIN}，到期时间: ${CYAN}${TRAFFIC_EXP_STR}${PLAIN}"
