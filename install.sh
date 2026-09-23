@@ -800,6 +800,28 @@ set_naive() {
   done
 }
 
+download_random_game_page() {
+  local target_dir="$1"
+  local api_url="https://api.github.com/repos/scssw/nvuser/contents/game?ref=main"
+  local pages page_url temp_file
+
+  pages=$(curl -fsSL "$api_url" 2>/dev/null | jq -r '.[] | select(.type == "file" and (.name | test("\\.html?$"; "i"))) | .download_url' 2>/dev/null)
+  if [[ -z "$pages" ]]; then
+    echo_content yellow "---> Could not list game pages; keeping the default index.html"
+    return 0
+  fi
+
+  page_url=$(printf '%s\n' "$pages" | shuf -n 1)
+  temp_file=$(mktemp "${target_dir}/.index.html.XXXXXX") || return 0
+  if curl -fsSL "$page_url" -o "$temp_file" 2>/dev/null && [[ -s "$temp_file" ]]; then
+    mv -f "$temp_file" "${target_dir}/index.html"
+    echo_content skyBlue "---> Random game page installed as ${target_dir}/index.html"
+  else
+    rm -f "$temp_file"
+    echo_content yellow "---> Could not download a game page; keeping the default index.html"
+  fi
+}
+
 bind_domain_for_install() {
   echo_content yellow "提示: 请先确认域名已正确解析到本机器公网 IP，且服务器 80 端口未被占用"
   while read -r -p "请输入要绑定的域名 (必填): " naive_domain; do
@@ -949,6 +971,8 @@ EOF
   systemctl daemon-reload &&
     systemctl enable naive &&
     systemctl restart naive
+
+  download_random_game_page "${NAIVE_DATA_SYSTEMD}html"
 
   # 设置定时任务 (每小时检测到期和流量超额)
   if command -v crontab &>/dev/null; then
